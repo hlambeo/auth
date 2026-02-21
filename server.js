@@ -49,7 +49,7 @@ async function initDb() {
     console.log('db ready');
 }
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'changeme123';
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'lam200610';
 
 async function logAttempt(key, hwid, ip, success, reason) {
     await pool.query(
