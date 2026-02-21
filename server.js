@@ -10,6 +10,7 @@ async function initDb() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS keys (
             key TEXT PRIMARY KEY,
+            name TEXT DEFAULT NULL,
             hwid TEXT DEFAULT NULL,
             created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()),
             expires_at BIGINT DEFAULT NULL,
@@ -82,7 +83,7 @@ app.post('/admin/genkey', async (req, res) => {
     if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
         return res.status(403).json({ error: 'forbidden' });
 
-    const { expires_days } = req.body;
+    const { expires_days, name } = req.body;
     const key = [
         crypto.randomBytes(4).toString('hex').toUpperCase(),
         crypto.randomBytes(4).toString('hex').toUpperCase(),
@@ -94,8 +95,8 @@ app.post('/admin/genkey', async (req, res) => {
         ? Math.floor(Date.now() / 1000) + (expires_days * 86400)
         : null;
 
-    await pool.query('INSERT INTO keys (key, expires_at) VALUES ($1, $2)', [key, expires_at]);
-    res.json({ key, expires_at });
+    await pool.query('INSERT INTO keys (key, name, expires_at) VALUES ($1, $2, $3)', [key, name || null, expires_at]);
+    res.json({ key, name, expires_at });
 });
 
 app.get('/admin/keys', async (req, res) => {
