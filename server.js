@@ -1,7 +1,17 @@
 const express = require('express');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const cors = require('cors');
 const app = express();
+
+app.use(cors({
+    origin: 'https://panel-production-c886.up.railway.app',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-admin-secret'],
+}));
+
+app.options('*', cors());
+
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
@@ -29,7 +39,7 @@ async function initDb() {
     console.log('db ready');
 }
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'changeme123';
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'lam200610';
 
 async function logAttempt(key, hwid, ip, success, reason) {
     await pool.query(
