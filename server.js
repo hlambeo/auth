@@ -1,18 +1,8 @@
 const express = require('express');
 const { Pool } = require('pg');
 const crypto = require('crypto');
-const cors = require('cors');
 const app = express();
-
-app.use(cors({
-    origin: 'https://panel-production-c886.up.railway.app',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'x-admin-secret'],
-}));
-
-app.options('*', cors());
-
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
@@ -35,11 +25,21 @@ async function initDb() {
             reason TEXT,
             timestamp BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())
         );
+        CREATE TABLE IF NOT EXISTS debug_logs (
+            id SERIAL PRIMARY KEY,
+            session_id TEXT,
+            timestamp BIGINT,
+            msg_num INTEGER,
+            direction TEXT,
+            msg_type TEXT,
+            size INTEGER,
+            hex_data TEXT
+        );
     `);
     console.log('db ready');
 }
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'lam200610';
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'changeme123';
 
 async function logAttempt(key, hwid, ip, success, reason) {
     await pool.query(
@@ -136,6 +136,50 @@ app.get('/admin/attempts', async (req, res) => {
         return res.status(403).json({ error: 'forbidden' });
     const { rows } = await pool.query('SELECT * FROM attempts ORDER BY timestamp DESC LIMIT 100');
     res.json(rows);
+});
+
+// Debug logging endpoints
+app.post('/debug/log', async (req, res) => {
+    if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
+        return res.status(403).json({ error: 'forbidden' });
+    
+    const { session_id, timestamp, msg_num, direction, msg_type, size, hex_data } = req.body;
+    
+    await pool.query(
+        'INSERT INTO debug_logs (session_id, timestamp, msg_num, direction, msg_type, size, hex_data) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [session_id, timestamp, msg_num, direction, msg_type, size, hex_data]
+    );
+    
+    res.json({ success: true });
+});
+
+app.get('/admin/debug/:session_id', async (req, res) => {
+    if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
+        return res.status(403).json({ error: 'forbidden' });
+    
+    const { rows } = await pool.query(
+        'SELECT * FROM debug_logs WHERE session_id = $1 ORDER BY msg_num ASC',
+        [req.params.session_id]
+    );
+    res.json(rows);
+});
+
+app.get('/admin/debug/sessions/list', async (req, res) => {
+    if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
+        return res.status(403).json({ error: 'forbidden' });
+    
+    const { rows } = await pool.query(
+        'SELECT DISTINCT session_id, MIN(timestamp) as started FROM debug_logs GROUP BY session_id ORDER BY started DESC LIMIT 50'
+    );
+    res.json(rows);
+});
+
+app.delete('/admin/debug/clear', async (req, res) => {
+    if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
+        return res.status(403).json({ error: 'forbidden' });
+    
+    await pool.query('DELETE FROM debug_logs');
+    res.json({ success: true, message: 'all logs cleared' });
 });
 
 const PORT = process.env.PORT || 3000;
