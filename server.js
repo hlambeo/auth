@@ -1,7 +1,17 @@
 const express = require('express');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const cors = require('cors');
 const app = express();
+
+app.use(cors({
+    origin: 'https://panel-production-c886.up.railway.app',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-admin-secret'],
+}));
+
+app.options('*', cors());
+
 app.use(express.json({ limit: '10mb' }));
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
