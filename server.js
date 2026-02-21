@@ -93,20 +93,21 @@ app.post('/admin/genkey', async (req, res) => {
     if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
         return res.status(403).json({ error: 'forbidden' });
 
-    const { expires_days, name } = req.body;
-    const key = [
-        crypto.randomBytes(4).toString('hex').toUpperCase(),
-        crypto.randomBytes(4).toString('hex').toUpperCase(),
-        crypto.randomBytes(4).toString('hex').toUpperCase(),
-        crypto.randomBytes(4).toString('hex').toUpperCase()
-    ].join('-');
+    const { key, expires_days } = req.body;
+
+    if (!key)
+        return res.status(400).json({ error: 'key required' });
 
     const expires_at = expires_days
         ? Math.floor(Date.now() / 1000) + (expires_days * 86400)
         : null;
 
-    await pool.query('INSERT INTO keys (key, name, expires_at) VALUES ($1, $2, $3)', [key, name || null, expires_at]);
-    res.json({ key, name, expires_at });
+    await pool.query(
+        'INSERT INTO keys (key, expires_at) VALUES ($1, $2)',
+        [key, expires_at]
+    );
+
+    res.json({ key, expires_at });
 });
 
 app.get('/admin/keys', async (req, res) => {
