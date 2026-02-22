@@ -45,6 +45,13 @@ async function initDb() {
             size INTEGER,
             hex_data TEXT
         );
+        CREATE TABLE IF NOT EXISTS debug_tokens (
+            token TEXT PRIMARY KEY,
+            license_key TEXT,
+            created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()),
+            expires_at BIGINT,
+            used INTEGER DEFAULT 0
+        );
     `);
     console.log('db ready');
 }
@@ -99,6 +106,83 @@ app.post('/auth', async (req, res) => {
     return res.json({ success: true, message: 'authenticated' });
 });
 
+// New endpoint: Get debug token using license key
+app.post('/auth/debug-token', async (req, res) => {
+    const { key, hwid } = req.body;
+
+    if (!key || !hwid)
+        return res.json({ success: false, message: 'missing fields' });
+
+    // Verify license key first
+    const { rows } = await pool.query('SELECT * FROM keys WHERE key = $1', [key]);
+    const row = rows[0];
+
+    if (!row || row.banned) {
+        return res.json({ success: false, message: 'invalid or banned key' });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (row.expires_at && row.expires_at < now) {
+        return res.json({ success: false, message: 'key expired' });
+    }
+
+    if (row.hwid && row.hwid !== hwid) {
+        return res.json({ success: false, message: 'hwid mismatch' });
+    }
+
+    // Generate temporary debug token (valid 24 hours)
+    const token = crypto.randomBytes(32).toString('hex');
+    const expires_at = now + (24 * 60 * 60);
+
+    await pool.query(
+        'INSERT INTO debug_tokens (token, license_key, expires_at) VALUES ($1, $2, $3)',
+        [token, key, expires_at]
+    );
+
+    res.json({ 
+        success: true, 
+        debug_token: token,
+        expires_at: expires_at
+    });
+});
+
+// Debug log endpoint - uses debug token instead of admin secret
+app.post('/debug/log', async (req, res) => {
+    const token = req.headers['x-debug-token'];
+    
+    if (!token) {
+        return res.status(403).json({ error: 'missing debug token' });
+    }
+
+    // Verify token
+    const { rows } = await pool.query(
+        'SELECT * FROM debug_tokens WHERE token = $1',
+        [token]
+    );
+    
+    if (rows.length === 0) {
+        return res.status(403).json({ error: 'invalid token' });
+    }
+
+    const tokenData = rows[0];
+    const now = Math.floor(Date.now() / 1000);
+
+    if (tokenData.expires_at < now) {
+        return res.status(403).json({ error: 'token expired' });
+    }
+
+    // Log the debug data
+    const { session_id, timestamp, msg_num, direction, msg_type, size, hex_data } = req.body;
+    
+    await pool.query(
+        'INSERT INTO debug_logs (session_id, timestamp, msg_num, direction, msg_type, size, hex_data) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [session_id, timestamp, msg_num, direction, msg_type, size, hex_data]
+    );
+    
+    res.json({ success: true });
+});
+
+// Admin endpoints (still use admin secret)
 app.post('/admin/genkey', async (req, res) => {
     if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
         return res.status(403).json({ error: 'forbidden' });
@@ -148,21 +232,6 @@ app.get('/admin/attempts', async (req, res) => {
     res.json(rows);
 });
 
-// Debug logging endpoints
-app.post('/debug/log', async (req, res) => {
-    if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
-        return res.status(403).json({ error: 'forbidden' });
-    
-    const { session_id, timestamp, msg_num, direction, msg_type, size, hex_data } = req.body;
-    
-    await pool.query(
-        'INSERT INTO debug_logs (session_id, timestamp, msg_num, direction, msg_type, size, hex_data) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [session_id, timestamp, msg_num, direction, msg_type, size, hex_data]
-    );
-    
-    res.json({ success: true });
-});
-
 app.get('/admin/debug/:session_id', async (req, res) => {
     if (req.headers['x-admin-secret'] !== ADMIN_SECRET)
         return res.status(403).json({ error: 'forbidden' });
@@ -189,7 +258,8 @@ app.delete('/admin/debug/clear', async (req, res) => {
         return res.status(403).json({ error: 'forbidden' });
     
     await pool.query('DELETE FROM debug_logs');
-    res.json({ success: true, message: 'all logs cleared' });
+    await pool.query('DELETE FROM debug_tokens');
+    res.json({ success: true, message: 'all logs and tokens cleared' });
 });
 
 const PORT = process.env.PORT || 3000;
