@@ -25,7 +25,10 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiscordConfig {
+    #[serde(alias = "token")]
     pub bot_token: Option<String>,
+    #[serde(alias = "default_channel")]
+    pub legacy_default_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +128,8 @@ pub struct GitRepoMonitor {
     pub emit_commits: bool,
     #[serde(default = "default_true")]
     pub emit_branch_changes: bool,
+    #[serde(default = "default_true")]
+    pub emit_issue_opened: bool,
     #[serde(default)]
     pub emit_pr_status: bool,
     pub channel: Option<String>,
@@ -141,6 +146,7 @@ impl Default for GitRepoMonitor {
             github_repo: None,
             emit_commits: true,
             emit_branch_changes: true,
+            emit_issue_opened: true,
             emit_pr_status: false,
             channel: None,
             mention: None,
@@ -213,7 +219,11 @@ impl AppConfig {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(path)?;
-        Ok(toml::from_str(&raw)?)
+        let mut config: Self = toml::from_str(&raw)?;
+        if config.defaults.channel.is_none() {
+            config.defaults.channel = config.discord.legacy_default_channel.clone();
+        }
+        Ok(config)
     }
 
     pub fn to_pretty_toml(&self) -> Result<String> {

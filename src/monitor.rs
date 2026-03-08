@@ -85,6 +85,7 @@ pub async fn run(
 struct GitRepoState {
     branch: String,
     head: String,
+    issues: HashMap<u64, IssueSnapshot>,
     prs: HashMap<u64, PullRequestSnapshot>,
 }
 
@@ -95,6 +96,11 @@ struct TmuxPaneState {
     content_hash: u64,
     last_change: Instant,
     last_stale_notification: Option<Instant>,
+}
+
+#[derive(Clone)]
+struct IssueSnapshot {
+    title: String,
 }
 
 #[derive(Clone)]
@@ -176,6 +182,61 @@ async fn poll_git(
                     }
                 }
 
+                let issues = if repo.emit_issue_opened {
+                    if let Some(client) = github_client {
+                        match fetch_issues(
+                            client,
+                            &config.monitors.github_api_base,
+                            repo,
+                            &snapshot,
+                        )
+                        .await
+                        {
+                            Ok(issues) => {
+                                if let Some(previous) = previous {
+                                    for event in collect_new_issue_events(
+                                        repo,
+                                        &snapshot.repo_name,
+                                        &previous.issues,
+                                        &issues,
+                                    ) {
+                                        if let Err(error) = dispatch_event(
+                                            router,
+                                            discord,
+                                            &event,
+                                            repo.mention.as_deref(),
+                                        )
+                                        .await
+                                        {
+                                            eprintln!(
+                                                "clawhip monitor issue dispatch failed: {error}"
+                                            );
+                                        }
+                                    }
+                                }
+                                issues
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "clawhip monitor GitHub issue polling failed for {}: {error}",
+                                    repo.path
+                                );
+                                previous
+                                    .map(|entry| entry.issues.clone())
+                                    .unwrap_or_default()
+                            }
+                        }
+                    } else {
+                        previous
+                            .map(|entry| entry.issues.clone())
+                            .unwrap_or_default()
+                    }
+                } else {
+                    previous
+                        .map(|entry| entry.issues.clone())
+                        .unwrap_or_default()
+                };
+
                 let prs = if repo.emit_pr_status {
                     if let Some(client) = github_client {
                         match fetch_pull_requests(
@@ -241,6 +302,7 @@ async fn poll_git(
                     GitRepoState {
                         branch: snapshot.branch,
                         head: snapshot.head,
+                        issues,
                         prs,
                     },
                 );
@@ -481,6 +543,59 @@ async fn list_new_commits(repo: &GitRepoMonitor, old: &str, new: &str) -> Result
         .collect())
 }
 
+fn collect_new_issue_events(
+    repo: &GitRepoMonitor,
+    repo_name: &str,
+    previous: &HashMap<u64, IssueSnapshot>,
+    current: &HashMap<u64, IssueSnapshot>,
+) -> Vec<IncomingEvent> {
+    current
+        .iter()
+        .filter(|(number, _)| !previous.contains_key(number))
+        .map(|(number, issue)| {
+            IncomingEvent::github_issue_opened(
+                repo_name.to_string(),
+                *number,
+                issue.title.clone(),
+                repo.channel.clone(),
+            )
+            .with_format(repo.format.clone())
+        })
+        .collect()
+}
+
+async fn fetch_issues(
+    client: &reqwest::Client,
+    api_base: &str,
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+) -> Result<HashMap<u64, IssueSnapshot>> {
+    let github_repo = snapshot
+        .github_repo
+        .clone()
+        .ok_or_else(|| format!("no GitHub repo configured or inferred for {}", repo.path))?;
+    let response = client
+        .get(format!(
+            "{}/repos/{}/issues",
+            api_base.trim_end_matches('/'),
+            github_repo
+        ))
+        .query(&[("state", "all"), ("per_page", "100")])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("GitHub API request failed with {status}: {body}").into());
+    }
+    let issues: Vec<GitHubIssue> = response.json().await?;
+    Ok(issues
+        .into_iter()
+        .filter(|issue| !issue.is_pull_request())
+        .map(|issue| (issue.number, IssueSnapshot { title: issue.title }))
+        .collect())
+}
+
 async fn fetch_pull_requests(
     client: &reqwest::Client,
     api_base: &str,
@@ -688,6 +803,20 @@ struct KeywordHit {
 }
 
 #[derive(Deserialize)]
+struct GitHubIssue {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+
+impl GitHubIssue {
+    fn is_pull_request(&self) -> bool {
+        self.pull_request.is_some()
+    }
+}
+
+#[derive(Deserialize)]
 struct GitHubPullRequest {
     number: u64,
     title: String,
@@ -699,6 +828,8 @@ struct GitHubPullRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AppConfig, DefaultsConfig, RouteRule};
+    use crate::router::Router;
 
     #[test]
     fn parses_github_repo_urls() {
@@ -710,6 +841,53 @@ mod tests {
             parse_github_repo("https://github.com/bellman/clawhip.git"),
             Some("bellman/clawhip".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn new_issue_events_match_repo_filter_and_route_mention() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            channel: Some("dev-channel".into()),
+            ..GitRepoMonitor::default()
+        };
+        let previous = HashMap::new();
+        let current = [(
+            2_u64,
+            IssueSnapshot {
+                title: "live issue".into(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let events = collect_new_issue_events(&repo, "clawhip", &previous, &current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].canonical_kind(), "github.issue-opened");
+        assert_eq!(events[0].payload["repo"], "clawhip");
+
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("fallback".into()),
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "github.*".into(),
+                filter: [("repo".to_string(), "clawhip".to_string())]
+                    .into_iter()
+                    .collect(),
+                channel: Some("route-channel".into()),
+                mention: Some("<@1465264645320474637>".into()),
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Alert),
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let (channel, _, content) = router.preview(&events[0]).await.unwrap();
+        assert_eq!(channel, "dev-channel");
+        assert!(content.starts_with("<@1465264645320474637> "));
+        assert!(content.contains("live issue"));
     }
 
     #[test]
