@@ -60,8 +60,11 @@ impl Router {
 
     fn route_for<'a>(&'a self, event: &IncomingEvent) -> Option<&'a RouteRule> {
         let context = event.template_context();
+        let candidates = route_candidates(event.canonical_kind());
         self.config.routes.iter().find(|route| {
-            glob_match(&route.event, event.canonical_kind())
+            candidates
+                .iter()
+                .any(|candidate| glob_match(&route.event, candidate))
                 && route.filter.iter().all(|(key, expected)| {
                     context
                         .get(key)
@@ -69,6 +72,14 @@ impl Router {
                         .unwrap_or(false)
                 })
         })
+    }
+}
+
+fn route_candidates(kind: &str) -> Vec<&str> {
+    match kind {
+        "git.commit" => vec!["git.commit", "github.commit"],
+        "git.branch-changed" => vec!["git.branch-changed", "github.branch-changed"],
+        other => vec![other],
     }
 }
 
@@ -301,6 +312,40 @@ mod tests {
         assert!(content.contains("two\nthree") || content.contains("two\r\nthree"));
         assert!(content.contains("now="));
         assert!(content.contains("iso="));
+    }
+
+    #[tokio::test]
+    async fn git_commit_can_use_github_route_family_and_mention() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default".into()),
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "github.*".into(),
+                filter: [("repo".to_string(), "clawhip".to_string())]
+                    .into_iter()
+                    .collect(),
+                channel: Some("route-channel".into()),
+                mention: Some("<@1465264645320474637>".into()),
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Compact),
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent::git_commit(
+            "clawhip".into(),
+            "main".into(),
+            "deadbeefcafebabe".into(),
+            "empty commit".into(),
+            None,
+        );
+        let (channel, _, content) = router.preview(&event).await.unwrap();
+        assert_eq!(channel, "route-channel");
+        assert!(content.starts_with("<@1465264645320474637> "));
+        assert!(content.contains("empty commit"));
     }
 
     #[tokio::test]
