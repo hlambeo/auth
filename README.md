@@ -108,6 +108,23 @@ Reference repo URL:
 https://github.com/Yeachan-Heo/clawhip
 ```
 
+## Discord bot setup
+
+> **Recommended:** Create a dedicated Discord bot for clawhip. Do not reuse your Clawdbot / OpenClaw bot token.
+
+clawhip sends high-volume notifications (commits, PRs, tmux keyword alerts, stale warnings). Using a separate bot keeps these cleanly separated from your AI chat bot.
+
+1. Create a new bot at [Discord Developer Portal](https://discord.com/developers/applications) (e.g. "CCNotifier")
+2. Copy the bot token
+3. Invite to your server with **Send Messages** permission
+4. Set the token in config:
+
+```toml
+[discord]
+token = "your-dedicated-clawhip-bot-token"
+default_channel = "your-default-channel-id"
+```
+
 ## System model
 
 ```text

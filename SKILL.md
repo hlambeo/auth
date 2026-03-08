@@ -74,6 +74,28 @@ clawhip uninstall --remove-systemd --remove-config
 ./install.sh --systemd
 ```
 
+## Discord bot token (recommended setup)
+
+⚠️ **Create a dedicated Discord bot for clawhip notifications.** Do not reuse your Clawdbot / OpenClaw bot token.
+
+Why:
+- clawhip sends high-volume notifications (commits, PRs, tmux events)
+- Using the same bot token as your gateway pollutes the bot's identity
+- A separate bot (e.g. "CCNotifier") keeps notifications cleanly separated from AI chat
+- If clawhip restarts or crashes, it won't affect your main bot
+
+Setup:
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Create a new application (e.g. "clawhip-notifier" or "CCNotifier")
+3. Create a bot, copy the token
+4. Invite the bot to your server with Send Messages permission
+5. Use this token in `~/.clawhip/config.toml`:
+
+```toml
+[discord]
+token = "your-dedicated-clawhip-bot-token"
+```
+
 ## Config scaffold expectations
 
 Key sections:
