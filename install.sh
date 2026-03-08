@@ -2,6 +2,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GITHUB_REPO="Yeachan-Heo/clawhip"
+INSTALLER_URL="${CLAWHIP_INSTALLER_URL:-https://github.com/${GITHUB_REPO}/releases/latest/download/clawhip-installer.sh}"
+CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export CARGO_HOME
 SYSTEMD=0
 for arg in "$@"; do
   case "$arg" in
@@ -10,20 +14,101 @@ for arg in "$@"; do
   esac
 done
 
-cd "$REPO_ROOT"
-echo "[clawhip] install flow: clone -> install.sh -> SKILL attach -> config scaffold -> daemon start -> live verification"
-echo "[clawhip] repo root: $REPO_ROOT"
-cargo install --path . --force
+log() {
+  echo "[clawhip] $*"
+}
+
+install_prebuilt_binary() {
+  if ! command -v curl >/dev/null 2>&1; then
+    log "curl is not installed; skipping prebuilt binary download"
+    return 1
+  fi
+
+  mkdir -p "$CARGO_HOME/bin"
+
+  log "attempting prebuilt binary install from ${INSTALLER_URL}"
+
+  local installer
+  installer="$(mktemp)"
+
+  if ! curl --proto '=https' --tlsv1.2 -LsSf "$INSTALLER_URL" -o "$installer"; then
+    log "no downloadable release installer found; falling back to cargo install"
+    rm -f "$installer"
+    return 1
+  fi
+
+  if sh "$installer"; then
+    rm -f "$installer"
+    return 0
+  else
+    local status=$?
+    log "prebuilt installer failed with status ${status}; falling back to cargo install"
+    rm -f "$installer"
+    return 1
+  fi
+}
+
+install_from_source() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    cat >&2 <<'MSG'
+[clawhip] A prebuilt binary was not available and Cargo is not installed.
+[clawhip] Install Rust with rustup, then rerun this installer:
+[clawhip]   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+[clawhip]   source "$HOME/.cargo/env"
+MSG
+    exit 1
+  fi
+
+  log "building from source with cargo install --path . --force"
+  cd "$REPO_ROOT"
+  cargo install --path . --force
+}
+
+installed_binary_path() {
+  if [[ -x "$CARGO_HOME/bin/clawhip" ]]; then
+    printf '%s\n' "$CARGO_HOME/bin/clawhip"
+    return 0
+  fi
+
+  if command -v clawhip >/dev/null 2>&1; then
+    command -v clawhip
+    return 0
+  fi
+
+  return 1
+}
+
+install_systemd_binary() {
+  local binary_path
+  binary_path="$(installed_binary_path)" || {
+    log "unable to find installed clawhip binary for systemd setup"
+    exit 1
+  }
+
+  log "installing $binary_path to /usr/local/bin/clawhip for systemd"
+  sudo install -m 755 "$binary_path" /usr/local/bin/clawhip
+}
+
+log "install flow: prebuilt binary -> cargo fallback -> SKILL attach -> config scaffold -> daemon start -> live verification"
+log "repo root: $REPO_ROOT"
+
+if install_prebuilt_binary; then
+  log "prebuilt binary installed successfully"
+else
+  install_from_source
+fi
+
 mkdir -p "$HOME/.clawhip"
-echo "[clawhip] ensured config dir $HOME/.clawhip"
-echo "[clawhip] next: read SKILL.md and attach the skill surface"
+log "ensured config dir $HOME/.clawhip"
+log "next: read SKILL.md and attach the skill surface"
 
 if [[ "$SYSTEMD" == "1" ]]; then
+  install_systemd_binary
   sudo cp deploy/clawhip.service /etc/systemd/system/clawhip.service
   sudo systemctl daemon-reload
   sudo systemctl enable --now clawhip
-  echo "[clawhip] systemd unit installed and started"
+  log "systemd unit installed and started"
 fi
 
-echo "[clawhip] recommended verification: scripts/live-verify-default-presets.sh <mode>"
-echo "[clawhip] install complete"
+log "recommended verification: scripts/live-verify-default-presets.sh <mode>"
+log "install complete"

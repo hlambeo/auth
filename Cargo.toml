@@ -2,6 +2,7 @@
 name = "clawhip"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/Yeachan-Heo/clawhip"
 
 [dependencies]
 axum = "0.8"
@@ -15,3 +16,8 @@ toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3.15"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
