@@ -59,3 +59,25 @@ Safety:
 - allowlisted token kinds only
 - short timeout
 - output capped
+
+## Lifecycle commands
+
+```bash
+clawhip install
+clawhip install --systemd
+clawhip update --restart
+clawhip uninstall --remove-systemd --remove-config
+```
+
+Repo helper:
+
+```bash
+./install.sh --systemd
+```
+
+## Live verification
+
+Use the operational runbook and helper script:
+
+- `docs/live-verification.md`
+- `scripts/live-verify-default-presets.sh`

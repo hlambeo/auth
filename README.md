@@ -55,6 +55,34 @@ Default daemon base URL:
 http://127.0.0.1:25294
 ```
 
+## Install / update / uninstall
+
+clawhip now includes lifecycle commands:
+
+```bash
+# install from current git clone
+clawhip install
+
+# install and set up systemd
+clawhip install --systemd
+
+# update from current git clone and optionally restart daemon
+clawhip update --restart
+
+# uninstall binary
+clawhip uninstall
+
+# uninstall and also remove systemd/config
+clawhip uninstall --remove-systemd --remove-config
+```
+
+A repo-root helper script is also included:
+
+```bash
+./install.sh
+./install.sh --systemd
+```
+
 ## Commands
 
 ### Start the daemon
@@ -352,6 +380,8 @@ clawhip config path
 
 ## systemd deployment
 
+Repo-root install helper: `install.sh`
+
 A ready-to-use unit file is included at:
 
 ```text
@@ -376,6 +406,21 @@ sudo systemctl status clawhip
 - `CLAWHIP_GITHUB_TOKEN`
 - `CLAWHIP_GIT_BIN`
 - `CLAWHIP_TMUX_BIN`
+
+## Live verification
+
+For operational sign-off of the built-in presets, use real verification instead of mock-only checks.
+
+See:
+
+- `docs/live-verification.md`
+- `scripts/live-verify-default-presets.sh`
+
+This covers the live workflows for:
+
+- GitHub issue opened / commented / closed
+- GitHub PR opened / status changed / merged
+- tmux keyword / stale / wrapper paths
 
 ## Development
 
