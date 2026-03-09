@@ -306,6 +306,7 @@ clawhip tmux new -s <session> \
   --keywords 'error,PR created,FAILED,complete' \
   --stale-minutes 10 \
   --format alert \
+  --retry-enter true \
   --shell /bin/zsh \
   -- command args
 
@@ -314,12 +315,13 @@ clawhip tmux watch -s <existing-session> \
   --mention '<@id>' \
   --keywords 'error,PR created,FAILED,complete' \
   --stale-minutes 10 \
-  --format alert
+  --format alert \
+  --retry-enter true
 ```
 
 Behavior:
 - `tmux new` creates a tmux session using the user's default shell (or `--shell` override)
-- `tmux new` sends the requested command into the session
+- `tmux new` sends the requested command into the session, retrying Enter for TUI apps by default (`--retry-enter=false` disables it)
 - `tmux watch` attaches monitoring to an already-running tmux session
 - both commands register the session with the daemon
 - daemon monitors keyword/stale events

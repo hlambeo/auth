@@ -206,6 +206,8 @@ async fn monitor_session(args: TmuxMonitorArgs, client: DaemonClient) -> Result<
     Ok(())
 }
 
+const RETRY_ENTER_DELAYS_MS: [u64; 3] = [500, 1_000, 2_000];
+
 async fn launch_session(args: &TmuxNewArgs) -> Result<()> {
     let mut command = Command::new(tmux_bin());
     command
@@ -225,30 +227,77 @@ async fn launch_session(args: &TmuxNewArgs) -> Result<()> {
     }
 
     if let Some(command) = build_command_to_send(args) {
-        send_command_to_session(&args.session, &command).await?;
+        if args.retry_enter {
+            send_keys_reliable(&args.session, &command, RETRY_ENTER_DELAYS_MS.len() as u32).await?;
+        } else {
+            send_command_to_session(&args.session, &command).await?;
+        }
     }
 
     Ok(())
 }
 
 async fn send_command_to_session(session: &str, command: &str) -> Result<()> {
+    send_literal_keys(session, command).await?;
+    send_enter_key(session, "Enter").await
+}
+
+async fn send_keys_reliable(session: &str, text: &str, max_retries: u32) -> Result<()> {
+    send_literal_keys(session, text).await?;
+    let mut baseline_hash = capture_target_hash(session).await?;
+    send_enter_key(session, "Enter").await?;
+
+    for delay in retry_enter_delays(max_retries) {
+        sleep(delay).await;
+        let first_hash = capture_target_hash(session).await?;
+        if first_hash != baseline_hash {
+            return Ok(());
+        }
+
+        sleep(delay).await;
+        let second_hash = capture_target_hash(session).await?;
+        if second_hash != first_hash {
+            return Ok(());
+        }
+
+        send_enter_key(session, "C-m").await?;
+        baseline_hash = second_hash;
+    }
+
+    Ok(())
+}
+
+fn retry_enter_delays(max_retries: u32) -> Vec<Duration> {
+    RETRY_ENTER_DELAYS_MS
+        .iter()
+        .copied()
+        .take(max_retries as usize)
+        .map(Duration::from_millis)
+        .collect()
+}
+
+async fn send_literal_keys(session: &str, text: &str) -> Result<()> {
     let literal_output = Command::new(tmux_bin())
         .arg("send-keys")
         .arg("-t")
         .arg(session)
         .arg("-l")
-        .arg(command)
+        .arg(text)
         .output()
         .await?;
     if !literal_output.status.success() {
         return Err(tmux_stderr(&literal_output.stderr).into());
     }
 
+    Ok(())
+}
+
+async fn send_enter_key(session: &str, key: &str) -> Result<()> {
     let enter_output = Command::new(tmux_bin())
         .arg("send-keys")
         .arg("-t")
         .arg(session)
-        .arg("Enter")
+        .arg(key)
         .output()
         .await?;
     if !enter_output.status.success() {
@@ -256,6 +305,23 @@ async fn send_command_to_session(session: &str, command: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn capture_target_hash(target: &str) -> Result<u64> {
+    let capture = Command::new(tmux_bin())
+        .arg("capture-pane")
+        .arg("-p")
+        .arg("-t")
+        .arg(target)
+        .arg("-S")
+        .arg("-200")
+        .output()
+        .await?;
+    if !capture.status.success() {
+        return Err(tmux_stderr(&capture.stderr).into());
+    }
+
+    Ok(content_hash(&String::from_utf8(capture.stdout)?))
 }
 
 fn build_command_to_send(args: &TmuxNewArgs) -> Option<String> {
@@ -453,6 +519,7 @@ PR created #7",
             stale_minutes: 10,
             format: None,
             attach: false,
+            retry_enter: true,
             shell: None,
             command: vec![
                 "zsh".into(),
@@ -479,6 +546,7 @@ PR created #7",
             stale_minutes: 10,
             format: None,
             attach: false,
+            retry_enter: true,
             shell: Some("/bin/zsh".into()),
             command: vec!["source ~/.zshrc && omx --madmax".into()],
         };
@@ -501,6 +569,7 @@ PR created #7",
             stale_minutes: 10,
             format: None,
             attach: false,
+            retry_enter: true,
             shell: None,
             command: vec!["source ~/.zshrc && omx --madmax".into()],
         };
@@ -520,6 +589,7 @@ PR created #7",
             keywords: vec!["error".into(), "complete".into()],
             stale_minutes: 15,
             format: Some(TmuxWrapperFormat::Inline),
+            retry_enter: true,
         };
 
         let monitor_args = TmuxMonitorArgs::from(&args);
@@ -533,5 +603,21 @@ PR created #7",
             monitor_args.format,
             Some(TmuxWrapperFormat::Inline)
         ));
+    }
+
+    #[test]
+    fn retry_enter_delays_respect_requested_backoff_limit() {
+        assert_eq!(
+            retry_enter_delays(2),
+            vec![Duration::from_millis(500), Duration::from_millis(1_000)]
+        );
+        assert_eq!(
+            retry_enter_delays(5),
+            vec![
+                Duration::from_millis(500),
+                Duration::from_millis(1_000),
+                Duration::from_millis(2_000)
+            ]
+        );
     }
 }

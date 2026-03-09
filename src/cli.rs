@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 use crate::events::MessageFormat;
 
@@ -243,6 +243,8 @@ pub struct TmuxNewArgs {
     pub format: Option<TmuxWrapperFormat>,
     #[arg(long, default_value_t = false)]
     pub attach: bool,
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    pub retry_enter: bool,
     #[arg(long)]
     pub shell: Option<String>,
     #[arg(last = true, allow_hyphen_values = true)]
@@ -263,6 +265,8 @@ pub struct TmuxWatchArgs {
     pub stale_minutes: u64,
     #[arg(long)]
     pub format: Option<TmuxWrapperFormat>,
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    pub retry_enter: bool,
 }
 
 #[derive(Debug, Clone, Default, Subcommand)]
@@ -385,6 +389,33 @@ mod tests {
         assert_eq!(args.mention.as_deref(), Some("<@123>"));
         assert_eq!(args.keywords, vec!["error", "complete"]);
         assert_eq!(args.stale_minutes, 15);
+        assert!(args.retry_enter);
         assert!(matches!(args.format, Some(TmuxWrapperFormat::Alert)));
+    }
+
+    #[test]
+    fn parses_tmux_new_with_retry_enter_disabled() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "tmux",
+            "new",
+            "-s",
+            "issue-22",
+            "--retry-enter=false",
+            "--",
+            "codex",
+        ]);
+
+        let Commands::Tmux { command } = cli.command.expect("tmux command") else {
+            panic!("expected tmux command");
+        };
+
+        let TmuxCommands::New(args) = command else {
+            panic!("expected tmux new command");
+        };
+
+        assert_eq!(args.session, "issue-22");
+        assert!(!args.retry_enter);
+        assert_eq!(args.command, vec!["codex"]);
     }
 }
