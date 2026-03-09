@@ -1,22 +1,24 @@
 use std::sync::Arc;
 
 use crate::Result;
-use crate::config::{AppConfig, RouteRule};
-use crate::discord::DiscordClient;
+use crate::config::{AppConfig, RouteRule, default_sink_name};
 use crate::dynamic_tokens;
 use crate::events::{IncomingEvent, MessageFormat};
+#[cfg(test)]
+use crate::render::DefaultRenderer;
+use crate::render::Renderer;
+#[cfg(test)]
+use crate::sink::Sink;
+use crate::sink::SinkTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeliveryTarget {
-    Channel(String),
-    Webhook(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryPreview {
-    pub target: DeliveryTarget,
+pub struct ResolvedDelivery {
+    pub sink: String,
+    pub target: SinkTarget,
     pub format: MessageFormat,
-    pub content: String,
+    pub mention: Option<String>,
+    pub template: Option<String>,
+    pub allow_dynamic_tokens: bool,
 }
 
 pub struct Router {
@@ -28,62 +30,120 @@ impl Router {
         Self { config }
     }
 
-    pub async fn dispatch(&self, event: &IncomingEvent, discord: &DiscordClient) -> Result<()> {
-        let delivery = self.preview_delivery(event).await?;
-        discord.send(&delivery.target, &delivery.content).await
+    #[cfg(test)]
+    pub async fn dispatch<S>(&self, event: &IncomingEvent, sink: &S) -> Result<()>
+    where
+        S: Sink + ?Sized,
+    {
+        let renderer = DefaultRenderer;
+        for delivery in self.resolve(event).await? {
+            let content = self.render_delivery(event, &delivery, &renderer).await?;
+            if let Err(error) = sink.send(&delivery.target, &content).await {
+                eprintln!(
+                    "clawhip router delivery failed to {:?}: {error}",
+                    delivery.target
+                );
+            }
+        }
+
+        Ok(())
     }
 
-    pub async fn preview_delivery(&self, event: &IncomingEvent) -> Result<DeliveryPreview> {
-        let route = self.route_for(event);
-        let target = self.target_for(event, route)?;
+    pub async fn resolve(&self, event: &IncomingEvent) -> Result<Vec<ResolvedDelivery>> {
+        let routes = self.routes_for(event);
+        let routes = if routes.is_empty() {
+            vec![None]
+        } else {
+            routes.into_iter().map(Some).collect()
+        };
+        let mut deliveries = Vec::with_capacity(routes.len());
+
+        for route in routes {
+            deliveries.push(self.resolve_delivery(event, route)?);
+        }
+
+        Ok(deliveries)
+    }
+
+    #[cfg(test)]
+    pub async fn preview_delivery(&self, event: &IncomingEvent) -> Result<ResolvedDelivery> {
+        let mut deliveries = self.resolve(event).await?;
+        if deliveries.len() != 1 {
+            return Err(format!("expected exactly one delivery, got {}", deliveries.len()).into());
+        }
+
+        Ok(deliveries.remove(0))
+    }
+
+    fn resolve_delivery(
+        &self,
+        event: &IncomingEvent,
+        route: Option<&RouteRule>,
+    ) -> Result<ResolvedDelivery> {
+        let sink = route
+            .map(|route| route.sink.trim())
+            .filter(|sink| !sink.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(default_sink_name);
+        let target = self.target_for(event, route, &sink)?;
         let format = event
             .format
             .clone()
             .or_else(|| route.and_then(|route| route.format.clone()))
             .unwrap_or_else(|| self.config.defaults.format.clone());
-        let allow_dynamic_tokens = self.allow_dynamic_tokens_for(event, route);
-        let content = if let Some(template) = event
-            .template
-            .as_deref()
-            .or_else(|| route.and_then(|route| route.template.as_deref()))
-        {
+
+        Ok(ResolvedDelivery {
+            sink,
+            target,
+            format,
+            mention: route
+                .and_then(|route| route.mention.clone())
+                .or_else(|| event.mention.clone()),
+            template: event
+                .template
+                .clone()
+                .or_else(|| route.and_then(|route| route.template.clone())),
+            allow_dynamic_tokens: self.allow_dynamic_tokens_for(event, route),
+        })
+    }
+
+    pub async fn render_delivery<R: Renderer + ?Sized>(
+        &self,
+        event: &IncomingEvent,
+        delivery: &ResolvedDelivery,
+        renderer: &R,
+    ) -> Result<String> {
+        let content = if let Some(template) = delivery.template.as_deref() {
             dynamic_tokens::render_template(
                 template,
                 &event.template_context(),
-                allow_dynamic_tokens,
+                delivery.allow_dynamic_tokens,
             )
             .await
         } else {
-            let rendered = event.render_default(&format)?;
-            if allow_dynamic_tokens {
+            let rendered = renderer.render(event, &delivery.format)?;
+            if delivery.allow_dynamic_tokens {
                 dynamic_tokens::render_template(&rendered, &event.template_context(), true).await
             } else {
                 rendered
             }
         };
-        let mention = route
-            .and_then(|route| route.mention.as_deref())
-            .or(event.mention.as_deref());
-        let content = match mention {
-            Some(mention) if !mention.trim().is_empty() => {
-                format!("{} {}", mention.trim(), content)
-            }
-            _ => content,
-        };
 
-        Ok(DeliveryPreview {
-            target,
-            format,
-            content,
-        })
+        match delivery.mention.as_deref().map(str::trim) {
+            Some(mention) if !mention.is_empty() => Ok(format!("{mention} {content}")),
+            _ => Ok(content),
+        }
     }
 
     #[cfg(test)]
     pub async fn preview(&self, event: &IncomingEvent) -> Result<(String, MessageFormat, String)> {
         let delivery = self.preview_delivery(event).await?;
+        let content = self
+            .render_delivery(event, &delivery, &DefaultRenderer)
+            .await?;
         match delivery.target {
-            DeliveryTarget::Channel(channel) => Ok((channel, delivery.format, delivery.content)),
-            DeliveryTarget::Webhook(_) => {
+            SinkTarget::DiscordChannel(channel) => Ok((channel, delivery.format, content)),
+            SinkTarget::DiscordWebhook(_) => {
                 Err("matched route uses a Discord webhook instead of a channel".into())
             }
         }
@@ -105,33 +165,46 @@ impl Router {
         false
     }
 
-    fn route_for<'a>(&'a self, event: &IncomingEvent) -> Option<&'a RouteRule> {
+    fn routes_for<'a>(&'a self, event: &IncomingEvent) -> Vec<&'a RouteRule> {
         let context = event.template_context();
         let candidates = route_candidates(event.canonical_kind());
-        self.config.routes.iter().find(|route| {
-            candidates
-                .iter()
-                .any(|candidate| glob_match(&route.event, candidate))
-                && route.filter.iter().all(|(key, expected)| {
-                    context
-                        .get(key)
-                        .map(|actual| glob_match(expected, actual))
-                        .unwrap_or(false)
-                })
-        })
+        self.config
+            .routes
+            .iter()
+            .filter(|route| {
+                candidates
+                    .iter()
+                    .any(|candidate| glob_match(&route.event, candidate))
+                    && route.filter.iter().all(|(key, expected)| {
+                        context
+                            .get(key)
+                            .map(|actual| glob_match(expected, actual))
+                            .unwrap_or(false)
+                    })
+            })
+            .collect()
     }
 
     fn target_for(
         &self,
         event: &IncomingEvent,
         route: Option<&RouteRule>,
-    ) -> Result<DeliveryTarget> {
+        sink: &str,
+    ) -> Result<SinkTarget> {
+        if sink != default_sink_name() {
+            return Err(format!(
+                "unsupported sink '{sink}' for event {}",
+                event.canonical_kind()
+            )
+            .into());
+        }
+
         if let Some(webhook) = route
             .and_then(|route| route.webhook.as_deref())
             .map(str::trim)
             .filter(|webhook| !webhook.is_empty())
         {
-            return Ok(DeliveryTarget::Webhook(webhook.to_string()));
+            return Ok(SinkTarget::DiscordWebhook(webhook.to_string()));
         }
 
         let channel = event
@@ -141,7 +214,7 @@ impl Router {
             .or_else(|| self.config.defaults.channel.clone())
             .ok_or_else(|| format!("no channel configured for event {}", event.canonical_kind()))?;
 
-        Ok(DeliveryTarget::Channel(channel))
+        Ok(SinkTarget::DiscordChannel(channel))
     }
 }
 
@@ -200,6 +273,182 @@ fn glob_match(pattern: &str, value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::{DefaultsConfig, RouteRule};
+    use crate::render::DefaultRenderer;
+    use crate::sink::DiscordSink;
+
+    #[tokio::test]
+    async fn resolve_returns_all_matching_deliveries_in_route_order() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default".into()),
+                format: MessageFormat::Compact,
+            },
+            routes: vec![
+                RouteRule {
+                    event: "tmux.keyword".into(),
+                    sink: "discord".into(),
+                    filter: Default::default(),
+                    channel: Some("ops".into()),
+                    webhook: None,
+                    mention: Some("@ops".into()),
+                    allow_dynamic_tokens: false,
+                    format: Some(MessageFormat::Alert),
+                    template: None,
+                },
+                RouteRule {
+                    event: "tmux.*".into(),
+                    sink: "discord".into(),
+                    filter: Default::default(),
+                    channel: Some("eng".into()),
+                    webhook: None,
+                    mention: Some("@eng".into()),
+                    allow_dynamic_tokens: false,
+                    format: Some(MessageFormat::Compact),
+                    template: Some("duplicate: {line}".into()),
+                },
+            ],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event =
+            IncomingEvent::tmux_keyword("issue-24".into(), "error".into(), "boom".into(), None);
+
+        let deliveries = router.resolve(&event).await.unwrap();
+
+        assert_eq!(deliveries.len(), 2);
+        assert_eq!(
+            deliveries[0].target,
+            SinkTarget::DiscordChannel("ops".into())
+        );
+        assert_eq!(deliveries[0].format, MessageFormat::Alert);
+        let first = router
+            .render_delivery(&event, &deliveries[0], &DefaultRenderer)
+            .await
+            .unwrap();
+        assert!(first.starts_with("@ops "));
+        assert!(first.contains("boom"));
+        assert_eq!(
+            deliveries[1].target,
+            SinkTarget::DiscordChannel("eng".into())
+        );
+        assert_eq!(deliveries[1].format, MessageFormat::Compact);
+        let second = router
+            .render_delivery(&event, &deliveries[1], &DefaultRenderer)
+            .await
+            .unwrap();
+        assert_eq!(second, "@eng duplicate: boom");
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_defaults_when_no_routes_match() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("fallback".into()),
+                format: MessageFormat::Alert,
+            },
+            routes: vec![RouteRule {
+                event: "github.*".into(),
+                sink: "discord".into(),
+                filter: Default::default(),
+                channel: Some("github".into()),
+                webhook: None,
+                mention: None,
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Compact),
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent::custom(None, "wake up".into());
+
+        let deliveries = router.resolve(&event).await.unwrap();
+
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].sink, default_sink_name());
+        assert_eq!(
+            deliveries[0].target,
+            SinkTarget::DiscordChannel("fallback".into())
+        );
+        assert_eq!(deliveries[0].format, MessageFormat::Alert);
+        assert_eq!(
+            router
+                .render_delivery(&event, &deliveries[0], &DefaultRenderer)
+                .await
+                .unwrap(),
+            "🚨 wake up"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_best_effort_continues_after_webhook_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::{Duration, timeout};
+
+        async fn spawn_webhook(status: &str) -> (String, tokio::task::JoinHandle<String>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let status_line = status.to_string();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0_u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let response = format!("HTTP/1.1 {status_line}\r\ncontent-length: 0\r\n\r\n");
+                stream.write_all(response.as_bytes()).await.unwrap();
+                req
+            });
+
+            (format!("http://{addr}/webhook"), server)
+        }
+
+        let (failing_webhook, failing_server) = spawn_webhook("500 Internal Server Error").await;
+        let (successful_webhook, successful_server) = spawn_webhook("204 No Content").await;
+        let config = AppConfig {
+            routes: vec![
+                RouteRule {
+                    event: "tmux.keyword".into(),
+                    sink: "discord".into(),
+                    filter: Default::default(),
+                    channel: None,
+                    webhook: Some(failing_webhook),
+                    mention: None,
+                    allow_dynamic_tokens: false,
+                    format: None,
+                    template: Some("first".into()),
+                },
+                RouteRule {
+                    event: "tmux.keyword".into(),
+                    sink: "discord".into(),
+                    filter: Default::default(),
+                    channel: None,
+                    webhook: Some(successful_webhook),
+                    mention: None,
+                    allow_dynamic_tokens: false,
+                    format: None,
+                    template: Some("second".into()),
+                },
+            ],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let discord = DiscordSink::from_config(Arc::new(AppConfig::default())).unwrap();
+        let event =
+            IncomingEvent::tmux_keyword("issue-24".into(), "error".into(), "boom".into(), None);
+
+        router.dispatch(&event, &discord).await.unwrap();
+
+        let failing_request = timeout(Duration::from_secs(2), failing_server)
+            .await
+            .unwrap()
+            .unwrap();
+        let successful_request = timeout(Duration::from_secs(2), successful_server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failing_request.contains("\"content\":\"first\""));
+        assert!(successful_request.contains("\"content\":\"second\""));
+    }
 
     #[tokio::test]
     async fn preview_uses_filtered_route_overrides() {
@@ -210,6 +459,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.*".into(),
+                sink: "discord".into(),
                 filter: [("session".to_string(), "issue-*".to_string())]
                     .into_iter()
                     .collect(),
@@ -244,6 +494,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "custom".into(),
+                sink: "discord".into(),
                 filter: Default::default(),
                 channel: Some("route".into()),
                 webhook: None,
@@ -271,6 +522,7 @@ mod tests {
             routes: vec![
                 RouteRule {
                     event: "github.*".into(),
+                    sink: "discord".into(),
                     filter: [("repo".to_string(), "clawhip".to_string())]
                         .into_iter()
                         .collect(),
@@ -283,6 +535,7 @@ mod tests {
                 },
                 RouteRule {
                     event: "tmux.*".into(),
+                    sink: "discord".into(),
                     filter: [("session".to_string(), "issue-*".to_string())]
                         .into_iter()
                         .collect(),
@@ -320,6 +573,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.*".into(),
+                sink: "discord".into(),
                 filter: Default::default(),
                 channel: Some("dynamic-route".into()),
                 webhook: None,
@@ -345,6 +599,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.*".into(),
+                sink: "discord".into(),
                 filter: Default::default(),
                 channel: Some("dynamic-route".into()),
                 webhook: None,
@@ -370,6 +625,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.*".into(),
+                sink: "discord".into(),
                 filter: [("session".to_string(), "issue-*".to_string())]
                     .into_iter()
                     .collect(),
@@ -403,6 +659,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.*".into(),
+                sink: "discord".into(),
                 filter: Default::default(),
                 channel: Some("tmux-route".into()),
                 webhook: None,
@@ -432,6 +689,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "github.*".into(),
+                sink: "discord".into(),
                 filter: [("repo".to_string(), "clawhip".to_string())]
                     .into_iter()
                     .collect(),
@@ -467,6 +725,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "github.*".into(),
+                sink: "discord".into(),
                 filter: [("repo".to_string(), "clawhip".to_string())]
                     .into_iter()
                     .collect(),
@@ -510,6 +769,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "agent.*".into(),
+                sink: "discord".into(),
                 filter: [("project".to_string(), "clawhip".to_string())]
                     .into_iter()
                     .collect(),
@@ -568,6 +828,7 @@ mod tests {
             routes: vec![
                 RouteRule {
                     event: "github.*".into(),
+                    sink: "discord".into(),
                     filter: [("repo".to_string(), "oh-my-claudecode".to_string())]
                         .into_iter()
                         .collect(),
@@ -580,6 +841,7 @@ mod tests {
                 },
                 RouteRule {
                     event: "github.*".into(),
+                    sink: "discord".into(),
                     filter: [("repo".to_string(), "clawhip".to_string())]
                         .into_iter()
                         .collect(),
@@ -608,6 +870,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
+                sink: "discord".into(),
                 filter: Default::default(),
                 channel: None,
                 webhook: Some("https://discord.com/api/webhooks/123/abc".into()),
@@ -625,9 +888,15 @@ mod tests {
         let delivery = router.preview_delivery(&event).await.unwrap();
         assert_eq!(
             delivery.target,
-            DeliveryTarget::Webhook("https://discord.com/api/webhooks/123/abc".into())
+            SinkTarget::DiscordWebhook("https://discord.com/api/webhooks/123/abc".into())
         );
-        assert!(delivery.content.contains("boom"));
+        assert_eq!(
+            router
+                .render_delivery(&event, &delivery, &DefaultRenderer)
+                .await
+                .unwrap(),
+            "tmux:issue-25 matched 'error' => boom"
+        );
     }
 
     #[tokio::test]
@@ -639,6 +908,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
+                sink: "discord".into(),
                 filter: Default::default(),
                 channel: None,
                 webhook: Some("https://discord.com/api/webhooks/123/abc".into()),
@@ -660,7 +930,7 @@ mod tests {
         let delivery = router.preview_delivery(&event).await.unwrap();
         assert_eq!(
             delivery.target,
-            DeliveryTarget::Webhook("https://discord.com/api/webhooks/123/abc".into())
+            SinkTarget::DiscordWebhook("https://discord.com/api/webhooks/123/abc".into())
         );
     }
 }

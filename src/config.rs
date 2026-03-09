@@ -11,8 +11,10 @@ use crate::events::MessageFormat;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "DiscordConfig::is_empty")]
     pub discord: DiscordConfig,
+    #[serde(default, skip_serializing_if = "ProvidersConfig::is_empty")]
+    pub providers: ProvidersConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
@@ -21,6 +23,12 @@ pub struct AppConfig {
     pub routes: Vec<RouteRule>,
     #[serde(default)]
     pub monitors: MonitorConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProvidersConfig {
+    #[serde(default)]
+    pub discord: DiscordConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -39,6 +47,18 @@ pub struct DaemonConfig {
     pub port: u16,
     #[serde(default = "default_base_url")]
     pub base_url: String,
+}
+
+impl DiscordConfig {
+    fn is_empty(&self) -> bool {
+        self.bot_token.is_none() && self.legacy_default_channel.is_none()
+    }
+}
+
+impl ProvidersConfig {
+    fn is_empty(&self) -> bool {
+        self.discord.is_empty()
+    }
 }
 
 impl Default for DaemonConfig {
@@ -67,11 +87,13 @@ impl Default for DefaultsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteRule {
     pub event: String,
     #[serde(default)]
     pub filter: BTreeMap<String, String>,
+    #[serde(default = "default_sink_name")]
+    pub sink: String,
     pub channel: Option<String>,
     pub webhook: Option<String>,
     pub mention: Option<String>,
@@ -79,6 +101,22 @@ pub struct RouteRule {
     pub allow_dynamic_tokens: bool,
     pub format: Option<MessageFormat>,
     pub template: Option<String>,
+}
+
+impl Default for RouteRule {
+    fn default() -> Self {
+        Self {
+            event: String::new(),
+            filter: BTreeMap::new(),
+            sink: default_sink_name(),
+            channel: None,
+            webhook: None,
+            mention: None,
+            allow_dynamic_tokens: false,
+            format: None,
+            template: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,7 +258,39 @@ fn default_true() -> bool {
     true
 }
 
+pub fn default_sink_name() -> String {
+    "discord".to_string()
+}
+
 const DISCORD_TOKEN_ENV_VARS: [&str; 2] = ["DISCORD_TOKEN", "CLAWHIP_DISCORD_BOT_TOKEN"];
+
+fn merge_legacy_discord_field(
+    field: &str,
+    legacy: Option<String>,
+    provider: &mut Option<String>,
+) -> Result<()> {
+    let legacy = normalize_text(legacy);
+    let provider_value = normalize_text(provider.clone());
+
+    match (legacy, provider_value) {
+        (Some(legacy), Some(provider_value)) if legacy != provider_value => Err(format!(
+            "conflicting legacy [discord].{field} and [providers.discord].{field} values"
+        )
+        .into()),
+        (Some(legacy), None) => {
+            *provider = Some(legacy);
+            Ok(())
+        }
+        (_, Some(provider_value)) => {
+            *provider = Some(provider_value);
+            Ok(())
+        }
+        (None, None) => {
+            *provider = None;
+            Ok(())
+        }
+    }
+}
 
 fn normalize_secret(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
@@ -248,12 +318,37 @@ impl AppConfig {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(path)?;
+        let raw_toml: toml::Value = toml::from_str(&raw)?;
         let mut config: Self = toml::from_str(&raw)?;
+        config.merge_legacy_discord(&raw_toml)?;
         config.normalize();
         if config.defaults.channel.is_none() {
-            config.defaults.channel = config.discord.legacy_default_channel.clone();
+            config.defaults.channel = config.discord_default_channel();
         }
         Ok(config)
+    }
+
+    fn merge_legacy_discord(&mut self, raw_toml: &toml::Value) -> Result<()> {
+        if raw_toml.get("discord").is_some() {
+            merge_legacy_discord_field(
+                "token",
+                self.discord.bot_token.clone(),
+                &mut self.providers.discord.bot_token,
+            )?;
+            merge_legacy_discord_field(
+                "default_channel",
+                self.discord.legacy_default_channel.clone(),
+                &mut self.providers.discord.legacy_default_channel,
+            )?;
+        }
+
+        self.discord = DiscordConfig::default();
+        Ok(())
+    }
+
+    fn discord_default_channel(&self) -> Option<String> {
+        normalize_text(self.providers.discord.legacy_default_channel.clone())
+            .or_else(|| normalize_text(self.discord.legacy_default_channel.clone()))
     }
 
     pub fn to_pretty_toml(&self) -> Result<String> {
@@ -277,6 +372,7 @@ impl AppConfig {
         F: FnMut(&str) -> Option<String>,
     {
         discord_token_from_env_with(get_env)
+            .or_else(|| normalize_secret(self.providers.discord.bot_token.clone()))
             .or_else(|| normalize_secret(self.discord.bot_token.clone()))
     }
 
@@ -290,7 +386,9 @@ impl AppConfig {
     {
         if discord_token_from_env_with(get_env).is_some() {
             "env"
-        } else if normalize_secret(self.discord.bot_token.clone()).is_some() {
+        } else if normalize_secret(self.providers.discord.bot_token.clone()).is_some()
+            || normalize_secret(self.discord.bot_token.clone()).is_some()
+        {
             "config"
         } else {
             "missing"
@@ -312,6 +410,20 @@ impl AppConfig {
         for (index, route) in self.routes.iter().enumerate() {
             let has_channel = normalize_secret(route.channel.clone()).is_some();
             let has_webhook = normalize_secret(route.webhook.clone()).is_some();
+            if route.sink.trim().is_empty() {
+                return Err(
+                    format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
+                );
+            }
+            if route.sink != default_sink_name() {
+                return Err(format!(
+                    "route #{} ({}) uses unsupported sink '{}'",
+                    index + 1,
+                    route.event,
+                    route.sink
+                )
+                .into());
+            }
             if has_channel && has_webhook {
                 return Err(format!(
                     "route #{} ({}) cannot set both channel and webhook",
@@ -324,7 +436,7 @@ impl AppConfig {
 
         if self.effective_token().is_none() && !self.has_webhook_routes() {
             return Err(
-                "missing Discord delivery config: configure a Discord bot token or at least one route webhook"
+                "missing Discord delivery config: configure [providers.discord].token (or legacy [discord].token) or at least one route webhook"
                     .into(),
             );
         }
@@ -344,6 +456,7 @@ impl AppConfig {
                 && route.mention.is_none()
                 && route.template.is_none()
         }) {
+            route.sink = default_sink_name();
             route.channel = None;
             route.webhook = Some(webhook);
             return;
@@ -352,6 +465,7 @@ impl AppConfig {
         self.routes.push(RouteRule {
             event: "*".to_string(),
             filter: BTreeMap::new(),
+            sink: default_sink_name(),
             channel: None,
             webhook: Some(webhook),
             mention: None,
@@ -390,7 +504,7 @@ impl AppConfig {
             println!("  6) Exit without saving");
             println!("  7) Print config template hint");
             match prompt("Selection")?.trim() {
-                "1" => self.discord.bot_token = empty_to_none(prompt("Bot token")?),
+                "1" => self.providers.discord.bot_token = empty_to_none(prompt("Bot token")?),
                 "2" => {
                     self.daemon.base_url =
                         prompt_with_default("Daemon base URL", Some(&self.daemon.base_url))?
@@ -436,7 +550,7 @@ impl AppConfig {
     fn print_template_hint(&self) {
         println!("Edit the config file directly for routes and monitor definitions.");
         println!(
-            "Sections: [daemon], [[routes]], [[monitors.git.repos]], [[monitors.tmux.sessions]]"
+            "Sections: [providers.discord], [daemon], [[routes]], [[monitors.git.repos]], [[monitors.tmux.sessions]]"
         );
         println!(
             "Routes may set either channel = \"...\" or webhook = \"https://discord.com/api/webhooks/...\"."
@@ -450,10 +564,15 @@ impl AppConfig {
         self.discord.bot_token = normalize_secret(self.discord.bot_token.clone());
         self.discord.legacy_default_channel =
             normalize_text(self.discord.legacy_default_channel.clone());
+        self.providers.discord.bot_token =
+            normalize_secret(self.providers.discord.bot_token.clone());
+        self.providers.discord.legacy_default_channel =
+            normalize_text(self.providers.discord.legacy_default_channel.clone());
         self.defaults.channel = normalize_text(self.defaults.channel.clone());
         self.monitors.github_token = normalize_secret(self.monitors.github_token.clone());
 
         for route in &mut self.routes {
+            route.sink = normalize_text(Some(route.sink.clone())).unwrap_or_else(default_sink_name);
             route.channel = normalize_text(route.channel.clone());
             route.webhook = normalize_text(route.webhook.clone());
             route.mention = normalize_text(route.mention.clone());
@@ -530,7 +649,7 @@ mod tests {
     #[test]
     fn discord_token_source_prefers_env_over_config() {
         let mut config = AppConfig::default();
-        config.discord.bot_token = Some("config-token".into());
+        config.providers.discord.bot_token = Some("config-token".into());
 
         assert_eq!(config.discord_token_source_with(|_| None), "config");
         assert_eq!(
@@ -576,6 +695,57 @@ mod tests {
     }
 
     #[test]
+    fn provider_discord_token_is_used_when_present() {
+        let mut config = AppConfig::default();
+        config.providers.discord.bot_token = Some("config-token".into());
+
+        assert_eq!(config.discord_token_source_with(|_| None), "config");
+        assert_eq!(
+            config.effective_token_with(|_| None).as_deref(),
+            Some("config-token")
+        );
+    }
+
+    #[test]
+    fn load_or_default_migrates_legacy_discord_to_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[discord]\ntoken = \"legacy-token\"\ndefault_channel = \"123\"\n",
+        )
+        .unwrap();
+
+        let config = AppConfig::load_or_default(&path).unwrap();
+
+        assert_eq!(
+            config.providers.discord.bot_token.as_deref(),
+            Some("legacy-token")
+        );
+        assert_eq!(
+            config.providers.discord.legacy_default_channel.as_deref(),
+            Some("123")
+        );
+        assert!(config.discord.is_empty());
+        assert_eq!(config.defaults.channel.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn load_or_default_rejects_conflicting_legacy_and_provider_discord() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[discord]\ntoken = \"legacy-token\"\n[providers.discord]\ntoken = \"provider-token\"\n",
+        )
+        .unwrap();
+
+        let error = AppConfig::load_or_default(&path).unwrap_err().to_string();
+
+        assert!(error.contains("conflicting legacy [discord].token"));
+    }
+
+    #[test]
     fn webhook_route_satisfies_delivery_validation_without_bot_token() {
         let config = AppConfig {
             routes: vec![RouteRule {
@@ -592,12 +762,15 @@ mod tests {
     #[test]
     fn route_cannot_set_channel_and_webhook() {
         let config = AppConfig {
-            discord: DiscordConfig {
-                bot_token: Some("token".into()),
-                legacy_default_channel: None,
+            providers: ProvidersConfig {
+                discord: DiscordConfig {
+                    bot_token: Some("token".into()),
+                    legacy_default_channel: None,
+                },
             },
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
+                sink: default_sink_name(),
                 channel: Some("123".into()),
                 webhook: Some("https://discord.com/api/webhooks/123/abc".into()),
                 ..RouteRule::default()
@@ -620,6 +793,7 @@ mod tests {
             config.routes[0].webhook.as_deref(),
             Some("https://discord.com/api/webhooks/123/abc")
         );
+        assert_eq!(config.routes[0].sink, "discord");
         assert_eq!(config.routes[0].channel, None);
     }
 

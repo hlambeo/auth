@@ -11,7 +11,7 @@
 
 > **⭐ Star this repo before using clawhip.** The installer will star it automatically if you have `gh` CLI authenticated.
 
-This is a standalone Discord bot / system daemon that whips your claw into organized contextual notifications.
+clawhip is a daemon-first Discord notification router with a typed event pipeline, extracted sources, and a clean renderer/sink split.
 
 Human install pitch:
 
@@ -26,6 +26,16 @@ Then OpenClaw should:
 - scaffold config / presets
 - start the daemon
 - run live verification for issue / PR / git / tmux / install flows
+
+## What shipped in v0.3.0
+
+- **Typed event model** — incoming events are normalized and validated into typed envelopes before dispatch.
+- **Multi-delivery router** — one event can resolve to zero, one, or many deliveries instead of stopping at the first match.
+- **Source extraction** — git, GitHub, and tmux monitoring now run as explicit sources feeding the daemon queue.
+- **Sink/render split** — rendering is separated from transport; v0.3.0 ships with the Discord sink and default renderer.
+- **Config compatibility** — `[providers.discord]` is the preferred config surface, while legacy `[discord]` still loads.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the release architecture that ships in v0.3.0.
 
 ## Good to use together
 
@@ -99,7 +109,7 @@ for entry in "${CHANNELS[@]}"; do
 
   clawhip send \
     --channel "$channel_id" \
-    --message "🔄 **[$project_name] Dev follow-up** $MENTION — check open PRs/issues, review failed CI, merge anything ready, and continue any stalled work."
+    --message "🔄 **[$project_name] Dev follow-up** $MENTION — check open PRs/issues, review open blockers, merge anything ready, and continue any stalled work."
 done
 ```
 
@@ -108,7 +118,7 @@ You can also send one-off nudges manually:
 ```bash
 clawhip send \
   --channel 1480171113253175356 \
-  --message "🔄 **[clawhip] Dev follow-up** <@1465264645320474637> — check open PRs/issues, fix red CI, and continue anything stalled."
+  --message "🔄 **[clawhip] Dev follow-up** <@1465264645320474637> — check open PRs/issues, review blockers, and continue anything stalled."
 
 clawhip send \
   --channel 1480171113253175357 \
@@ -127,7 +137,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 Operational notes:
 - keep one channel entry per active repo/project
 - mention your Clawdbot/OpenClaw bot user so the bot actually wakes up and acts
-- use plain operational language like "check open PRs/issues", "fix red CI", and "continue stalled work"
+- use plain operational language like "check open PRs/issues", "review blockers", and "continue stalled work"
 - this keeps scheduling outside the agent loop: cron handles timing, clawhip handles delivery, Discord handles the handoff
 
 ## Plugin architecture
@@ -156,8 +166,9 @@ Operational spec for OpenClaw / Clawdbot agents consuming this repo.
 Repo role:
 - executable/runtime repo
 - daemon-first Discord notification gateway
-- built-in GitHub/git/tmux monitoring runtime
-- route/filter/message-render engine
+- typed event routing runtime
+- extracted Git/GitHub/tmux source monitors
+- multi-delivery router with renderer/sink separation
 - lifecycle surface: install / update / uninstall / start / status
 
 Attachment model:
@@ -204,10 +215,12 @@ clawhip sends high-volume notifications (commits, PRs, tmux keyword alerts, stal
 4. Set the token in config:
 
 ```toml
-[discord]
+[providers.discord]
 token = "your-dedicated-clawhip-bot-token"
 default_channel = "your-default-channel-id"
 ```
+
+Legacy `[discord]` config is still accepted and normalized at load time.
 
 ## Discord webhook setup
 
@@ -224,21 +237,27 @@ Route example:
 ```toml
 [[routes]]
 event = "tmux.keyword"
+sink = "discord"
 webhook = "https://discord.com/api/webhooks/..."
 ```
 
 ## System model
 
 ```text
-[input] -> [clawhip daemon :25294] -> [route/filter/preset render] -> [Discord REST delivery]
+[CLI / webhook / git / GitHub / tmux]
+              -> [sources]
+              -> [mpsc queue]
+              -> [dispatcher]
+              -> [router -> renderer -> discord sink]
+              -> [Discord REST delivery]
 ```
 
-Input sources:
-- CLI thin clients
-- GitHub webhooks
-- built-in git monitor
-- built-in tmux monitor
-- `clawhip tmux new` registration path
+Input sources in v0.3.0:
+- CLI thin clients and custom events
+- GitHub webhook ingress plus GitHub polling source
+- git monitor source
+- tmux monitor source
+- `clawhip tmux new` / `clawhip tmux watch` registration path
 
 ## Input -> behavior -> verification
 
@@ -494,6 +513,7 @@ Route model:
 [[routes]]
 event = "github.*"
 filter = { repo = "clawhip" }
+sink = "discord"
 channel = "1480171113253175356"
 mention = "<@1465264645320474637>"
 format = "compact"
@@ -502,6 +522,7 @@ allow_dynamic_tokens = false
 [[routes]]
 event = "agent.*"
 filter = { project = "clawhip" }
+sink = "discord"
 channel = "1480171113253175356"
 format = "alert"
 allow_dynamic_tokens = false

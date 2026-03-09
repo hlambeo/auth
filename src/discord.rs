@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::Result;
 use crate::config::AppConfig;
-use crate::router::DeliveryTarget;
+use crate::sink::SinkTarget;
 
 #[derive(Clone)]
 pub struct DiscordClient {
@@ -43,10 +43,12 @@ impl DiscordClient {
         })
     }
 
-    pub async fn send(&self, target: &DeliveryTarget, content: &str) -> Result<()> {
+    pub async fn send(&self, target: &SinkTarget, content: &str) -> Result<()> {
         match target {
-            DeliveryTarget::Channel(channel_id) => self.send_message(channel_id, content).await,
-            DeliveryTarget::Webhook(webhook_url) => self.send_webhook(webhook_url, content).await,
+            SinkTarget::DiscordChannel(channel_id) => self.send_message(channel_id, content).await,
+            SinkTarget::DiscordWebhook(webhook_url) => {
+                self.send_webhook(webhook_url, content).await
+            }
         }
     }
 
@@ -57,7 +59,7 @@ impl DiscordClient {
             channel_id
         );
         let client = self.bot_client.as_ref().ok_or_else(|| {
-            "missing Discord bot token for channel delivery; configure [discord].token or use a route webhook"
+            "missing Discord bot token for channel delivery; configure [providers.discord].token (or legacy [discord].token) or use a route webhook"
                 .to_string()
         })?;
         let response = self

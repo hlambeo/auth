@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::Result;
 use crate::config::AppConfig;
 use crate::events::IncomingEvent;
-use crate::monitor::RegisteredTmuxSession;
+use crate::source::tmux::RegisteredTmuxSession;
 
 #[derive(Clone)]
 pub struct DaemonClient {
