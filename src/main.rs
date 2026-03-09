@@ -7,6 +7,7 @@ mod dynamic_tokens;
 mod events;
 mod lifecycle;
 mod monitor;
+mod plugins;
 mod router;
 mod tmux_wrapper;
 
@@ -15,7 +16,8 @@ use std::sync::Arc;
 use clap::Parser;
 
 use crate::cli::{
-    AgentCommands, Cli, Commands, ConfigCommand, GitCommands, GithubCommands, TmuxCommands,
+    AgentCommands, Cli, Commands, ConfigCommand, GitCommands, GithubCommands, PluginCommands,
+    TmuxCommands,
 };
 use crate::client::DaemonClient;
 use crate::config::AppConfig;
@@ -191,6 +193,28 @@ async fn real_main() -> Result<()> {
             }
             ConfigCommand::Path => {
                 println!("{}", config_path.display());
+                Ok(())
+            }
+        },
+        Commands::Plugin { command } => match command {
+            PluginCommands::List => {
+                let plugins_dir = plugins::default_plugins_dir()?;
+                let discovered = plugins::load_plugins(&plugins_dir)?;
+
+                if discovered.is_empty() {
+                    println!("No plugins found in {}", plugins_dir.display());
+                    return Ok(());
+                }
+
+                println!("NAME\tBRIDGE\tDESCRIPTION");
+                for plugin in discovered {
+                    println!(
+                        "{}\t{}\t{}",
+                        plugin.name,
+                        plugin.bridge_path.display(),
+                        plugin.description.as_deref().unwrap_or("-"),
+                    );
+                }
                 Ok(())
             }
         },

@@ -65,6 +65,25 @@ clawhip tmux new -s issue-456 \
 
 See [`skills/omc/`](skills/omc/) for ready-to-use scripts.
 
+## Plugin architecture
+
+clawhip now includes a simple `plugins/` directory for tool-specific shell bridges.
+Each plugin lives in its own subdirectory with:
+
+- `plugin.toml` for lightweight metadata
+- `bridge.sh` for shell hook entrypoints
+
+Built-in starter plugins:
+
+- `plugins/codex/`
+- `plugins/claude-code/`
+
+List installed plugins with:
+
+```bash
+clawhip plugin list
+```
+
 ## Description
 
 Operational spec for OpenClaw / Clawdbot agents consuming this repo.
@@ -520,5 +539,5 @@ clawhip github ...      # thin client GitHub event
 clawhip git ...         # thin client git event
 clawhip agent ...       # thin client agent lifecycle event
 clawhip tmux ...        # thin client / wrapper surface
+clawhip plugin list     # list installed/bundled shell-hook plugins
 ```
-

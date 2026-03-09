@@ -73,6 +73,20 @@ MSG
   cargo install --path . --force
 }
 
+sync_plugins() {
+  local source_dir="$REPO_ROOT/plugins"
+  local target_dir="$HOME/.clawhip/plugins"
+
+  if [[ ! -d "$source_dir" ]]; then
+    return 0
+  fi
+
+  rm -rf "$target_dir"
+  mkdir -p "$(dirname "$target_dir")"
+  cp -R "$source_dir" "$target_dir"
+  log "synced plugins to $target_dir"
+}
+
 installed_binary_path() {
   if [[ -x "$CARGO_HOME/bin/clawhip" ]]; then
     printf '%s\n' "$CARGO_HOME/bin/clawhip"
@@ -111,6 +125,7 @@ fi
 
 mkdir -p "$HOME/.clawhip"
 log "ensured config dir $HOME/.clawhip"
+sync_plugins
 log "next: read SKILL.md and attach the skill surface"
 
 if [[ "$SYSTEMD" == "1" ]]; then

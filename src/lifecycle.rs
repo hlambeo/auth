@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::Result;
+use crate::{Result, plugins};
 
 pub fn install(systemd: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
@@ -12,6 +12,7 @@ pub fn install(systemd: bool) -> Result<()> {
         .arg("--path")
         .arg(&repo_root))?;
     ensure_config_dir()?;
+    plugins::install_bundled_plugins(&config_dir().join("plugins"))?;
     if systemd {
         install_systemd(&repo_root)?;
     }
@@ -31,6 +32,8 @@ pub fn update(restart: bool) -> Result<()> {
         .arg("--path")
         .arg(&repo_root)
         .arg("--force"))?;
+    ensure_config_dir()?;
+    plugins::install_bundled_plugins(&config_dir().join("plugins"))?;
     if restart {
         restart_systemd_if_present()?;
     }

@@ -85,6 +85,11 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         remove_config: bool,
     },
+    /// Manage tool integration plugins.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
     /// Manage configuration.
     Config {
         #[command(subcommand)]
@@ -252,6 +257,11 @@ pub struct AgentFailedArgs {
     pub event: AgentEventArgs,
     #[arg(long = "error")]
     pub error_message: String,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum PluginCommands {
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -571,5 +581,16 @@ mod tests {
         assert_eq!(args.session, "issue-22");
         assert!(!args.retry_enter);
         assert_eq!(args.command, vec!["codex"]);
+    }
+
+    #[test]
+    fn parses_plugin_list_subcommand() {
+        let cli = Cli::parse_from(["clawhip", "plugin", "list"]);
+
+        let Commands::Plugin { command } = cli.command.expect("plugin command") else {
+            panic!("expected plugin command");
+        };
+
+        assert!(matches!(command, PluginCommands::List));
     }
 }
