@@ -44,6 +44,8 @@ pub struct IncomingEvent {
     #[serde(default)]
     pub channel: Option<String>,
     #[serde(default)]
+    pub mention: Option<String>,
+    #[serde(default)]
     pub format: Option<MessageFormat>,
     #[serde(default)]
     pub template: Option<String>,
@@ -57,6 +59,8 @@ struct IncomingEventWire {
     kind: String,
     #[serde(default)]
     channel: Option<String>,
+    #[serde(default)]
+    mention: Option<String>,
     #[serde(default)]
     format: Option<MessageFormat>,
     #[serde(default)]
@@ -80,6 +84,7 @@ impl<'de> Deserialize<'de> for IncomingEvent {
         Ok(Self {
             kind: wire.kind,
             channel: wire.channel,
+            mention: wire.mention,
             format: wire.format,
             template: wire.template,
             payload,
@@ -92,6 +97,7 @@ impl IncomingEvent {
         Self {
             kind: "custom".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({ "message": message }),
@@ -136,6 +142,7 @@ impl IncomingEvent {
         Self {
             kind: kind.to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: Value::Object(payload),
@@ -245,6 +252,7 @@ impl IncomingEvent {
         Self {
             kind: "github.issue-opened".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({ "repo": repo, "number": number, "title": title }),
@@ -261,6 +269,7 @@ impl IncomingEvent {
         Self {
             kind: "github.issue-commented".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({ "repo": repo, "number": number, "title": title, "comments": comments }),
@@ -276,6 +285,7 @@ impl IncomingEvent {
         Self {
             kind: "github.issue-closed".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({ "repo": repo, "number": number, "title": title }),
@@ -292,6 +302,7 @@ impl IncomingEvent {
         Self {
             kind: "git.commit".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({
@@ -313,6 +324,7 @@ impl IncomingEvent {
         Self {
             kind: "git.branch-changed".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({
@@ -335,6 +347,7 @@ impl IncomingEvent {
         Self {
             kind: "github.pr-status-changed".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({
@@ -357,6 +370,7 @@ impl IncomingEvent {
         Self {
             kind: "tmux.keyword".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({ "session": session, "keyword": keyword, "line": line }),
@@ -373,6 +387,7 @@ impl IncomingEvent {
         Self {
             kind: "tmux.stale".to_string(),
             channel,
+            mention: None,
             format: None,
             template: None,
             payload: json!({
@@ -775,6 +790,39 @@ mod tests {
         let event = IncomingEvent::github_issue_opened("repo".into(), 42, "broken".into(), None);
         let rendered = render_template("{repo} #{number}: {title}", &event.template_context());
         assert_eq!(rendered, "repo #42: broken");
+    }
+
+    #[test]
+    fn constructors_default_top_level_mention_to_none() {
+        let custom = IncomingEvent::custom(None, "wake up".into());
+        assert_eq!(custom.mention, None);
+
+        let keyword = IncomingEvent::tmux_keyword(
+            "issue-24".into(),
+            "error".into(),
+            "boom".into(),
+            Some("alerts".into()),
+        );
+        assert_eq!(keyword.mention, None);
+    }
+
+    #[test]
+    fn deserializes_top_level_mention_field() {
+        let event: IncomingEvent = serde_json::from_value(json!({
+            "type": "tmux.keyword",
+            "channel": "alerts",
+            "mention": "<@123>",
+            "payload": {
+                "session": "issue-24",
+                "keyword": "error",
+                "line": "boom"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(event.mention.as_deref(), Some("<@123>"));
+        assert_eq!(event.channel.as_deref(), Some("alerts"));
+        assert_eq!(event.payload["session"], json!("issue-24"));
     }
 
     #[test]

@@ -53,7 +53,10 @@ impl Router {
                 rendered
             }
         };
-        let content = match route.and_then(|route| route.mention.as_deref()) {
+        let mention = route
+            .and_then(|route| route.mention.as_deref())
+            .or(event.mention.as_deref());
+        let content = match mention {
             Some(mention) if !mention.trim().is_empty() => {
                 format!("{} {}", mention.trim(), content)
             }
@@ -303,6 +306,66 @@ mod tests {
         let event = IncomingEvent::custom(None, "ignored".into());
         let (_, _, content) = router.preview(&event).await.unwrap();
         assert_eq!(content, "ignored");
+    }
+
+    #[tokio::test]
+    async fn event_level_mention_is_used_when_route_mention_is_not_set() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default".into()),
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "tmux.*".into(),
+                filter: [("session".to_string(), "issue-*".to_string())]
+                    .into_iter()
+                    .collect(),
+                channel: Some("tmux-route".into()),
+                mention: None,
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Alert),
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let mut event =
+            IncomingEvent::tmux_keyword("issue-1440".into(), "error".into(), "failed".into(), None);
+        event.mention = Some("<@event>".into());
+
+        let (channel, format, content) = router.preview(&event).await.unwrap();
+        assert_eq!(channel, "tmux-route");
+        assert_eq!(format, MessageFormat::Alert);
+        assert!(content.starts_with("<@event> "));
+        assert!(content.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn route_mention_takes_precedence_over_event_mention() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default".into()),
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "tmux.*".into(),
+                filter: Default::default(),
+                channel: Some("tmux-route".into()),
+                mention: Some("<@route>".into()),
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Compact),
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let mut event =
+            IncomingEvent::tmux_keyword("issue-1440".into(), "error".into(), "failed".into(), None);
+        event.mention = Some("<@event>".into());
+
+        let (_, _, content) = router.preview(&event).await.unwrap();
+        assert!(content.starts_with("<@route> "));
+        assert!(!content.starts_with("<@event> "));
     }
 
     #[tokio::test]

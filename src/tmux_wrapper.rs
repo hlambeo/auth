@@ -162,13 +162,12 @@ async fn monitor_session(args: TmuxMonitorArgs, client: DaemonClient) -> Result<
                         let hits =
                             collect_keyword_hits(&existing.snapshot, &pane.content, &keywords);
                         for hit in hits {
-                            let mut event = IncomingEvent::tmux_keyword(
+                            let event = tmux_keyword_event(
+                                &args,
                                 pane.session.clone(),
                                 hit.keyword,
                                 hit.line,
-                                args.channel.clone(),
                             );
-                            event.format = args.format.map(Into::into);
                             client.send_event(&event).await?;
                         }
 
@@ -184,14 +183,12 @@ async fn monitor_session(args: TmuxMonitorArgs, client: DaemonClient) -> Result<
                             .map(|previous| now.duration_since(previous) >= stale_after)
                             .unwrap_or(true)
                     {
-                        let mut event = IncomingEvent::tmux_stale(
+                        let event = tmux_stale_event(
+                            &args,
                             existing.session.clone(),
                             existing.pane_name.clone(),
-                            args.stale_minutes,
                             latest_line,
-                            args.channel.clone(),
                         );
-                        event.format = args.format.map(Into::into);
                         client.send_event(&event).await?;
                         existing.last_stale_notification = Some(now);
                     }
@@ -204,6 +201,36 @@ async fn monitor_session(args: TmuxMonitorArgs, client: DaemonClient) -> Result<
     }
 
     Ok(())
+}
+
+fn tmux_keyword_event(
+    args: &TmuxMonitorArgs,
+    session: String,
+    keyword: String,
+    line: String,
+) -> IncomingEvent {
+    let mut event = IncomingEvent::tmux_keyword(session, keyword, line, args.channel.clone());
+    event.format = args.format.map(Into::into);
+    event.mention = args.mention.clone();
+    event
+}
+
+fn tmux_stale_event(
+    args: &TmuxMonitorArgs,
+    session: String,
+    pane: String,
+    last_line: String,
+) -> IncomingEvent {
+    let mut event = IncomingEvent::tmux_stale(
+        session,
+        pane,
+        args.stale_minutes,
+        last_line,
+        args.channel.clone(),
+    );
+    event.format = args.format.map(Into::into);
+    event.mention = args.mention.clone();
+    event
 }
 
 const RETRY_ENTER_DELAYS_MS: [u64; 3] = [500, 1_000, 2_000];
@@ -603,6 +630,55 @@ PR created #7",
             monitor_args.format,
             Some(TmuxWrapperFormat::Inline)
         ));
+    }
+
+    #[test]
+    fn tmux_keyword_event_inherits_channel_format_and_mention() {
+        let args = TmuxMonitorArgs {
+            session: "issue-24".into(),
+            channel: Some("alerts".into()),
+            mention: Some("<@123>".into()),
+            keywords: vec!["error".into()],
+            stale_minutes: 15,
+            format: Some(TmuxWrapperFormat::Alert),
+        };
+
+        let event = tmux_keyword_event(&args, "issue-24".into(), "error".into(), "boom".into());
+
+        assert_eq!(event.channel.as_deref(), Some("alerts"));
+        assert_eq!(event.mention.as_deref(), Some("<@123>"));
+        assert!(matches!(
+            event.format,
+            Some(crate::events::MessageFormat::Alert)
+        ));
+        assert_eq!(event.payload["session"], "issue-24");
+        assert_eq!(event.payload["keyword"], "error");
+        assert_eq!(event.payload["line"], "boom");
+    }
+
+    #[test]
+    fn tmux_stale_event_inherits_channel_format_and_mention() {
+        let args = TmuxMonitorArgs {
+            session: "issue-24".into(),
+            channel: Some("alerts".into()),
+            mention: Some("<@123>".into()),
+            keywords: vec!["error".into()],
+            stale_minutes: 15,
+            format: Some(TmuxWrapperFormat::Inline),
+        };
+
+        let event = tmux_stale_event(&args, "issue-24".into(), "0.0".into(), "waiting".into());
+
+        assert_eq!(event.channel.as_deref(), Some("alerts"));
+        assert_eq!(event.mention.as_deref(), Some("<@123>"));
+        assert!(matches!(
+            event.format,
+            Some(crate::events::MessageFormat::Inline)
+        ));
+        assert_eq!(event.payload["session"], "issue-24");
+        assert_eq!(event.payload["pane"], "0.0");
+        assert_eq!(event.payload["minutes"], 15);
+        assert_eq!(event.payload["last_line"], "waiting");
     }
 
     #[test]
