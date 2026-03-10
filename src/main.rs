@@ -9,6 +9,7 @@ mod event;
 mod events;
 mod keyword_window;
 mod lifecycle;
+mod memory;
 mod plugins;
 mod render;
 mod router;
@@ -22,8 +23,8 @@ use std::sync::Arc;
 use clap::Parser;
 
 use crate::cli::{
-    AgentCommands, Cli, Commands, ConfigCommand, GitCommands, GithubCommands, PluginCommands,
-    TmuxCommands,
+    AgentCommands, Cli, Commands, ConfigCommand, GitCommands, GithubCommands, MemoryCommands,
+    PluginCommands, TmuxCommands,
 };
 use crate::client::DaemonClient;
 use crate::config::AppConfig;
@@ -238,6 +239,10 @@ async fn real_main() -> Result<()> {
                 }
                 Ok(())
             }
+        },
+        Commands::Memory { command } => match command {
+            MemoryCommands::Init(args) => memory::init(args),
+            MemoryCommands::Status(args) => memory::status(args),
         },
     }
 }

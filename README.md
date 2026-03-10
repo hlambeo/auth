@@ -160,6 +160,20 @@ Start here:
 - [docs/examples/MEMORY.example.md](docs/examples/MEMORY.example.md)
 - [skills/memory-offload/SKILL.md](skills/memory-offload/SKILL.md)
 
+Runtime support now includes a small bootstrap/inspection surface:
+
+```bash
+# create a scaffold in the current repo
+clawhip memory init --project clawhip --channel discord-alerts --agent codex
+
+# inspect whether the expected files and directories exist
+clawhip memory status --project clawhip --channel discord-alerts --agent codex
+```
+
+`clawhip memory init` creates `MEMORY.md`, `memory/README.md`, a daily shard, a project shard,
+topic files, and optional channel/agent shards without overwriting existing files unless you pass
+`--force`.
+
 ## Plugin architecture
 
 clawhip now includes a simple `plugins/` directory for tool-specific shell bridges.

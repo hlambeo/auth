@@ -15,6 +15,34 @@ A good default policy is:
 - write detail into leaf files
 - update root pointers only when the map or current beliefs change
 
+## Bootstrap with clawhip
+
+clawhip now ships a first runtime vertical slice for this pattern:
+
+```bash
+# initialize a scaffold in the current repo
+clawhip memory init --project clawhip --channel discord-alerts --agent codex
+
+# pin a specific daily shard name when backfilling or scripting
+clawhip memory init --project clawhip --date 2026-03-10
+
+# inspect the scaffold and list missing recommended paths
+clawhip memory status --project clawhip --channel discord-alerts --agent codex
+```
+
+What `clawhip memory init` bootstraps:
+
+- `MEMORY.md`
+- `memory/README.md`
+- `memory/daily/YYYY-MM-DD.md`
+- `memory/projects/<project>.md`
+- `memory/topics/rules.md`
+- `memory/topics/lessons.md`
+- optional `memory/channels/<channel>.md`
+- optional `memory/agents/<agent>.md`
+
+The command leaves existing files untouched by default and only overwrites scaffold files when you pass `--force`.
+
 ## What goes where
 
 ### Put in `MEMORY.md`

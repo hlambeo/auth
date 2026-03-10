@@ -107,6 +107,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    /// Bootstrap and inspect filesystem-offloaded memory scaffolds.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -369,6 +374,55 @@ pub struct TmuxWatchArgs {
     pub format: Option<TmuxWrapperFormat>,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub retry_enter: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum MemoryCommands {
+    /// Create a filesystem-offloaded memory scaffold in a repo or workspace.
+    Init(MemoryInitArgs),
+    /// Inspect whether a filesystem-offloaded memory scaffold is present.
+    Status(MemoryStatusArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MemoryInitArgs {
+    /// Root directory where MEMORY.md and memory/ should live.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// Stable project slug for memory/projects/<project>.md.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Optional channel slug for memory/channels/<channel>.md.
+    #[arg(long)]
+    pub channel: Option<String>,
+    /// Optional agent slug for memory/agents/<agent>.md.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Daily shard name to create under memory/daily/ (YYYY-MM-DD).
+    #[arg(long)]
+    pub date: Option<String>,
+    /// Overwrite generated scaffold files when they already exist.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MemoryStatusArgs {
+    /// Root directory where MEMORY.md and memory/ should live.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// Stable project slug to inspect under memory/projects/<project>.md.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Optional channel slug to inspect under memory/channels/<channel>.md.
+    #[arg(long)]
+    pub channel: Option<String>,
+    /// Optional agent slug to inspect under memory/agents/<agent>.md.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Daily shard name to inspect under memory/daily/ (YYYY-MM-DD).
+    #[arg(long)]
+    pub date: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Subcommand)]
@@ -684,6 +738,70 @@ mod tests {
         };
 
         assert!(matches!(command, PluginCommands::List));
+    }
+
+    #[test]
+    fn parses_memory_init_subcommand() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "memory",
+            "init",
+            "--root",
+            "/tmp/workspace",
+            "--project",
+            "clawhip",
+            "--channel",
+            "discord-alerts",
+            "--agent",
+            "codex",
+            "--date",
+            "2026-03-10",
+            "--force",
+        ]);
+
+        let Commands::Memory { command } = cli.command.expect("memory command") else {
+            panic!("expected memory command");
+        };
+
+        let MemoryCommands::Init(args) = command else {
+            panic!("expected memory init command");
+        };
+
+        assert_eq!(args.root, Some(PathBuf::from("/tmp/workspace")));
+        assert_eq!(args.project.as_deref(), Some("clawhip"));
+        assert_eq!(args.channel.as_deref(), Some("discord-alerts"));
+        assert_eq!(args.agent.as_deref(), Some("codex"));
+        assert_eq!(args.date.as_deref(), Some("2026-03-10"));
+        assert!(args.force);
+    }
+
+    #[test]
+    fn parses_memory_status_subcommand() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "memory",
+            "status",
+            "--root",
+            "/tmp/workspace",
+            "--project",
+            "clawhip",
+            "--agent",
+            "codex",
+        ]);
+
+        let Commands::Memory { command } = cli.command.expect("memory command") else {
+            panic!("expected memory command");
+        };
+
+        let MemoryCommands::Status(args) = command else {
+            panic!("expected memory status command");
+        };
+
+        assert_eq!(args.root, Some(PathBuf::from("/tmp/workspace")));
+        assert_eq!(args.project.as_deref(), Some("clawhip"));
+        assert_eq!(args.channel, None);
+        assert_eq!(args.agent.as_deref(), Some("codex"));
+        assert_eq!(args.date, None);
     }
 
     #[test]
